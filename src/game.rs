@@ -1,15 +1,149 @@
 use std::fmt::{Display, Formatter};
+use std::io::{stdout, stderr, Write};
 use rand::{Rng, thread_rng};
 use rand::distributions::Uniform;
+use crossterm::{
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{Event, KeyEvent, KeyEventKind, KeyCode},
+    cursor::{MoveTo},
+};
 
-#[derive(Debug)]
-struct Game {
+use crate::tui::{Component, BoxedComponent, Controls, Title};
 
+type IoResult<T> = std::io::Result<T>;
+
+//#[derive(Debug)]
+pub(crate) struct Game {
+    pub(crate) field: Field,
+    field_loc: (u16, u16),
+    cursor: (u16, u16),
+    terminal_size: (u16, u16),
+    game_ended: bool,
+    closed: bool,
+}
+
+impl Game {
+    pub(crate) fn new(field: Field) -> IoResult<Self> {
+        execute!(stdout(), EnterAlternateScreen)?;
+//        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self {
+            field,
+            field_loc: (1, 1),
+            cursor: (0, 0),
+            terminal_size: terminal::size()?,
+            game_ended: false,
+            closed: false
+        })
+    }
+
+    pub(crate) fn close(&mut self) -> IoResult<()> {
+//        crossterm::terminal::disable_raw_mode()?;
+        execute!(stdout(), LeaveAlternateScreen)?;
+        self.closed = true;
+        Ok(())
+    }
+
+    pub(crate) fn render(&self) -> IoResult<()> {
+        let mut buffer = vec![String::new(); self.terminal_size.1 as usize];
+        let buf = BoxedComponent(&self.field).render_at(&mut buffer);
+        let buf = BoxedComponent(&Controls).render_at(buf);
+        if self.game_ended {
+            Title::new("Game Over").render_at(buf);
+        }
+        execute!(stdout(), MoveTo(0, 0))?;
+        write!(stdout(), "{}", buffer.into_iter()
+            .collect::<Vec<_>>()
+            .join("\n")
+        )?;
+
+        execute!(stdout(), MoveTo(self.cursor.0 + self.field_loc.0, self.cursor.1 + self.field_loc.1))?;
+        write!(stdout(), "◎")?;
+        execute!(stdout(), MoveTo(0, self.field.board.len() as u16 + 1))
+    }
+
+    // Returned bool indicates whether to continue (true for continue, false for exit)
+    pub(crate) fn handle_event(&mut self, event: Event) -> IoResult<bool> {
+        match event {
+            Event::Key(KeyEvent { code, kind: KeyEventKind::Press, .. }) => match code {
+                KeyCode::Left => self.step_cursor(Direction::Left),
+                KeyCode::Right => self.step_cursor(Direction::Right),
+                KeyCode::Up => self.step_cursor(Direction::Up),
+                KeyCode::Down => self.step_cursor(Direction::Down),
+                KeyCode::Char(' ') => {
+                    let r = self.field.clear_cell((self.cursor.1 as usize, self.cursor.0 as usize));
+                    if matches!(r, Some(true)) {
+                        self.game_ended = true;
+                    }
+                },
+                KeyCode::Char('f') => {
+                    let _ = self.field.toggle_flag((self.cursor.1 as usize, self.cursor.0 as usize));
+                }
+                KeyCode::Char('q') => return Ok(false),
+                _ => { },
+            }
+            Event::Resize(width, height) => self.terminal_size = (width, height),
+            _ => { },
+        }
+
+        Ok(true)
+    }
+
+    fn move_cursor(&mut self, pos: (u16, u16)) {
+        if pos.0 >= self.field_loc.0
+            && pos.1 >= self.field_loc.1
+            && pos.0 < self.field_loc.0 + self.field.width() as u16
+            && pos.1 < self.field_loc.1 + self.field.height() as u16
+        {
+            self.cursor.0 = pos.0 - self.field_loc.0;
+            self.cursor.1 = pos.1 - self.field_loc.1;
+        }
+    }
+
+    fn step_cursor(&mut self, direction: Direction) {
+        let new_pos = direction.offset(self.cursor);
+        if new_pos.0 < self.field.width() as u16 && new_pos.1 < self.field.height() as u16 {
+            self.cursor = new_pos;
+        }
+    }
+}
+
+impl Drop for Game {
+    fn drop(&mut self) {
+        use std::thread::panicking;
+        if !self.closed {
+            if let Err(e) = self.close() {
+                if panicking() {
+                    let _ = writeln!(stderr(), "{}", e);
+                } else {
+                    Err::<(), std::io::Error>(e).unwrap();
+                }
+            }
+        }
+    }
+}
+
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Direction {
+    fn offset(&self, pos: (u16, u16)) -> (u16, u16) {
+        match self {
+            Direction::Left => (if pos.0 > 0 { pos.0 - 1 } else { 0 }, pos.1),
+            Direction::Right => (pos.0 + 1, pos.1),
+            Direction::Up => (pos.0, if pos.1 > 0 { pos.1 - 1 } else { 0 }),
+            Direction::Down => (pos.0, pos.1 + 1),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct Field {
-    board: Vec<Vec<Cell>>,
+    pub(crate) board: Vec<Vec<Cell>>,
 }
 
 impl Field {
@@ -56,12 +190,6 @@ impl Field {
         Some(Self { board })
     }
 
-    pub(crate) fn render(&self) -> Vec<String> {
-        self.board.iter()
-            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
-            .collect()
-    }
-
     /// Returns a bool signifying if a mine has exploded. Returns None if the given cell has already
     /// been cleared or flagged, or if the given cell is invalid.
     pub(crate) fn clear_cell(&mut self, pos: (usize, usize)) -> Option<bool> {
@@ -103,10 +231,20 @@ impl Field {
 
         Some(false)
     }
+
+    /// Returns a bool signifying that the flag was valid (i.e., that the cell was not already
+    /// revealed). Returns None if the cell was invalid.
+    fn toggle_flag(&mut self, pos: (usize, usize)) -> Option<bool> {
+        Some(
+            self.board.get_mut(pos.0)?
+                .get_mut(pos.1)?
+                .toggle_flag()
+        )
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
-struct Cell {
+pub(crate) struct Cell {
     state: CellState,
     neighbors: u8,
     mine: bool,
@@ -122,6 +260,7 @@ impl Display for Cell {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", match self.state {
             CellState::Unrevealed => "█".to_string(),
+//            CellState::Unrevealed => "▓".to_string(),
             CellState::Flagged => "⚑".to_string(),
             CellState::Revealed => self.neighbors.to_string(),
             CellState::Exploded => "✲".to_string(),
@@ -169,11 +308,11 @@ impl Cell {
 
 #[derive(Copy, Clone, Debug)]
 enum CellState {
-    Unrevealed,
-    Flagged,
-    Revealed,
-    Exploded,
-    Empty,
+    Unrevealed, // Initial state
+    Flagged,    // Flagged
+    Revealed,   // Clicked on, showing a number
+    Exploded,   // Clicked on, was a mine
+    Empty,      // Clicked on, no mines
 }
 
 enum RevealStatus {

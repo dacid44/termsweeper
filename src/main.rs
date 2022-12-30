@@ -1,26 +1,29 @@
-use std::io::{stdin, stdout, Write};
-use crate::game::Field;
+use crate::game::{Field, Game};
 
 mod game;
+mod tui;
 
 fn main() {
     println!("Hello, world!");
 
-    let mut field = Field::new((25, 25), 40).unwrap();
+    let mut game = Game::new(Field::new((25, 25), 40).unwrap()).unwrap();
 
-    println!("{}", field.render().join("\n"));
+    game.render().unwrap();
 
-    loop {
-        print!("Guess: ");
-        stdout().flush().unwrap();
-        let mut s = String::new();
-        stdin().read_line(&mut s).unwrap();
-        let nums = s.trim().split_whitespace().collect::<Vec<_>>();
-        let row = nums[0].parse::<usize>().unwrap();
-        let col = nums[1].parse::<usize>().unwrap();
-        println!("{:?}", field.clear_cell((row, col)));
-        println!("{}", field.render().join("\n"));
+    while game.handle_event(crossterm::event::read().unwrap()).unwrap() {
+//        print!("Guess: ");
+//        stdout().flush().unwrap();
+//        let mut s = String::new();
+//        stdin().read_line(&mut s).unwrap();
+//        let nums = s.trim().split_whitespace().collect::<Vec<_>>();
+//        let row = nums[0].parse::<usize>().unwrap();
+//        let col = nums[1].parse::<usize>().unwrap();
+//        println!("{:?}", game.field.clear_cell((row, col)));
+//        game.render().unwrap();
+
+//        game.handle_event(crossterm::event::read().unwrap()).unwrap();
+        game.render().unwrap();
     }
 }
 
-// TODO next: resolve borrow checker issues, display the board with crossterm (and then, controls)
+// TODO: Make relocatable
